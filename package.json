@@ -1,0 +1,52 @@
+{
+  "name": "yamlcert",
+  "displayName": "Kubernetes TLS Certificate Viewer",
+  "description": "Displays certificate details from Kubernetes TLS Secret YAML files on request.",
+  "version": "0.0.1",
+  "publisher": "Simone Natalini <s.natalini@outlook.com>",
+  "repository": "",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:yamlcert.showCertificate"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "yamlcert.showCertificate",
+        "title": "Kubernetes TLS: Show Certificate Details",
+        "icon": "$(key)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "yamlcert.showCertificate",
+          "when": "resourceLangId == yaml",
+          "group": "navigation@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . && esbuild webview/main.ts --bundle --format=iife --platform=browser --target=chrome102 --outfile=out/webview.js",
+    "test": "npm run compile && node --test out/test/*.test.js"
+  },
+  "dependencies": {
+    "@fluentui/tokens": "^1.0.0-alpha.24",
+    "@fluentui/web-components": "^3.1.3",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.5.4"
+  }
+}
