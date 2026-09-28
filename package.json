@@ -3,7 +3,7 @@
   "displayName": "Kubernetes TLS Certificate Viewer",
   "description": "Displays certificate details from Kubernetes TLS Secret YAML files on request.",
   "version": "0.0.1",
-  "publisher": "Simone Natalini <s.natalini@outlook.com>",
+  "publisher": "local",
   "repository": "",
   "engines": {
     "vscode": "^1.85.0"
