@@ -31,11 +31,11 @@ jobs:
         run: node -e "if (process.env.GITHUB_REF_NAME !== 'v' + require('./package.json').version) process.exit(1)"
 
       - name: Package VSIX
-        run: npx vsce package --out yamlcert.vsix
+        run: npx vsce package --out certview.vsix
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: yamlcert.vsix
+          files: certview.vsix

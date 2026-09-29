@@ -1,175 +1,191 @@
-import { randomBytes } from 'node:crypto';
+import { X509Certificate, randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import { CertificateDetails, parseTlsSecretCertificate } from './certificate';
+import { TlsSecretError, parseTlsSecretCertificates } from './certificate';
+import { PfxPasswordError, parseCertificateFile } from './certificateFile';
+import { analyzeChain } from './chain';
+import { PageContext, renderCertificatePage, renderMessagePage } from './render';
+import { TrustStore, loadTrustStore } from './trust';
 
-const panels = new Map<string, vscode.WebviewPanel>();
+type Mode = 'command' | 'follow' | 'refresh';
+type FileKind = 'yaml' | 'certificate';
+
+const CERTIFICATE_EXTENSIONS = /\.(crt|cer|pem|pfx|p12)$/i;
+const BINARY_EXTENSIONS = /\.(pfx|p12)$/i;
+const YAML_EXTENSIONS = /\.ya?ml$/i;
+const TRUST_STORE_TTL_MS = 5 * 60 * 1000;
+
+let panel: vscode.WebviewPanel | undefined;
+let currentUri: vscode.Uri | undefined;
+let requestId = 0;
+let trustCache: { store: TrustStore; loadedAt: number } | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
+    vscode.window.tabGroups.onDidChangeTabs(() => followActiveEditor(context)),
+    vscode.window.onDidChangeActiveTextEditor(() => followActiveEditor(context)),
     vscode.workspace.onDidChangeTextDocument(event => {
-      if (panels.has(event.document.uri.toString())) {
-        showCertificate(context, event.document, true);
+      if (event.contentChanges.length > 0 && currentUri && event.document.uri.toString() === currentUri.toString()) {
+        void present(context, currentUri, 'refresh');
       }
     }),
-    vscode.commands.registerCommand('yamlcert.showCertificate', async () => {
-      const document = vscode.window.activeTextEditor?.document;
-      if (!document) {
+    vscode.commands.registerCommand('certview.showCertificate', async (resource?: vscode.Uri) => {
+      const uri = resource instanceof vscode.Uri
+        ? resource
+        : activeUri() ?? vscode.window.activeTextEditor?.document.uri;
+      if (!uri || !fileKind(uri)) {
+        await vscode.window.showInformationMessage('Open a Kubernetes TLS Secret YAML, or a .crt, .pem or .pfx file first.');
         return;
       }
-
-      try {
-        const details = parseTlsSecretCertificate(document.getText());
-        if (!details) {
-          await vscode.window.showInformationMessage('The active file is not a Kubernetes TLS Secret.');
-          return;
-        }
-        displayCertificate(context, document, details);
-      } catch (error) {
-        await vscode.window.showErrorMessage(errorMessage(error));
-      }
-    })
+      await present(context, uri, 'command');
+    }),
+    { dispose: () => panel?.dispose() }
   );
 }
 
-function showCertificate(context: vscode.ExtensionContext, document: vscode.TextDocument, refreshing = false): void {
-  if (document.languageId !== 'yaml') {
+function fileKind(uri: vscode.Uri): FileKind | undefined {
+  if (CERTIFICATE_EXTENSIONS.test(uri.path)) {
+    return 'certificate';
+  }
+  if (YAML_EXTENSIONS.test(uri.path)) {
+    return 'yaml';
+  }
+  const document = vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === uri.toString());
+  return document?.languageId === 'yaml' ? 'yaml' : undefined;
+}
+
+function activeUri(): vscode.Uri | undefined {
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  return input instanceof vscode.TabInputText || input instanceof vscode.TabInputCustom ? input.uri : undefined;
+}
+
+function followActiveEditor(context: vscode.ExtensionContext): void {
+  const uri = activeUri();
+  if (!panel || !uri || uri.toString() === currentUri?.toString() || !fileKind(uri)) {
+    return;
+  }
+  void present(context, uri, 'follow');
+}
+
+async function loadCertificates(uri: vscode.Uri, kind: FileKind, password?: string): Promise<X509Certificate[] | undefined> {
+  const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === uri.toString());
+  if (kind === 'yaml') {
+    const document = openDocument ?? await vscode.workspace.openTextDocument(uri);
+    return parseTlsSecretCertificates(document.getText());
+  }
+
+  if (openDocument && !BINARY_EXTENSIONS.test(uri.path)) {
+    return parseCertificateFile(Buffer.from(openDocument.getText(), 'utf8'), password);
+  }
+  return parseCertificateFile(Buffer.from(await vscode.workspace.fs.readFile(uri)), password);
+}
+
+function trustStore(): TrustStore {
+  if (!trustCache || Date.now() - trustCache.loadedAt > TRUST_STORE_TTL_MS) {
+    trustCache = { store: loadTrustStore(), loadedAt: Date.now() };
+  }
+  return trustCache.store;
+}
+
+async function present(context: vscode.ExtensionContext, uri: vscode.Uri, mode: Mode): Promise<void> {
+  const kind = fileKind(uri);
+  if (!kind) {
     return;
   }
 
-  const key = document.uri.toString();
-  try {
-    const details = parseTlsSecretCertificate(document.getText());
-    if (details) {
-      displayCertificate(context, document, details, !refreshing);
-    } else if (refreshing) {
-      panels.get(key)?.dispose();
-    }
-  } catch (error) {
-    const panel = panels.get(key);
-    if (panel) {
-      panel.webview.html = renderError(errorMessage(error));
-    } else if (!refreshing && /type:\s*["']?kubernetes\.io\/tls/.test(document.getText())) {
-      vscode.window.showErrorMessage(errorMessage(error));
+  const id = ++requestId;
+  const name = uri.path.split('/').pop() ?? 'certificate';
+  const display = (render: (page: PageContext) => string) => show(context, uri, name, mode === 'command', render);
+  let password: string | undefined;
+
+  for (;;) {
+    try {
+      const certificates = await loadCertificates(uri, kind, password);
+      if (id !== requestId) {
+        return;
+      }
+      if (!certificates || certificates.length === 0) {
+        if (mode === 'command') {
+          await vscode.window.showInformationMessage('The selected file is not a Kubernetes TLS Secret.');
+        } else if (mode === 'refresh') {
+          display(page => renderMessagePage(page, 'No certificate', 'This file no longer contains a Kubernetes TLS Secret certificate.'));
+        }
+        return;
+      }
+
+      const analysis = analyzeChain(certificates, trustStore());
+      display(page => renderCertificatePage(page, name, analysis));
+      return;
+    } catch (error) {
+      if (id !== requestId) {
+        return;
+      }
+
+      if (error instanceof PfxPasswordError) {
+        if (mode !== 'command') {
+          display(page => renderMessagePage(page, 'Password required', 'This PKCS#12 file is password protected. Run "CertView: Show Certificate Details" to enter the password.'));
+          return;
+        }
+        password = await vscode.window.showInputBox({
+          title: `Password for ${name}`,
+          prompt: error.passwordProvided ? 'Incorrect password. Try again.' : 'Enter the PKCS#12 password. It is used once and never stored.',
+          password: true,
+          ignoreFocusOut: true
+        });
+        if (password === undefined || id !== requestId) {
+          return;
+        }
+        continue;
+      }
+
+      const message = errorMessage(error);
+      if (mode === 'command') {
+        await vscode.window.showErrorMessage(message);
+      } else if (kind === 'certificate' || mode === 'refresh' || error instanceof TlsSecretError) {
+        display(page => renderMessagePage(page, 'Certificate error', message));
+      }
+      return;
     }
   }
 }
 
-function displayCertificate(context: vscode.ExtensionContext, document: vscode.TextDocument, details: CertificateDetails, reveal = true): void {
-  const key = document.uri.toString();
-  let panel = panels.get(key);
-  if (panel) {
-    if (reveal) {
-      panel.reveal(vscode.ViewColumn.Beside);
-    }
-  } else {
-    panel = vscode.window.createWebviewPanel(
-      'yamlcert.certificate',
-      `Certificate: ${document.fileName.split(/[\\/]/).pop() ?? 'TLS Secret'}`,
-      vscode.ViewColumn.Beside,
+function show(
+  context: vscode.ExtensionContext,
+  uri: vscode.Uri,
+  name: string,
+  reveal: boolean,
+  render: (page: PageContext) => string
+): void {
+  const title = `Certificate: ${name}`;
+  if (!panel) {
+    const created = vscode.window.createWebviewPanel(
+      'certview.certificate',
+      title,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       {
         enableScripts: true,
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'out')]
       }
     );
-    panels.set(key, panel);
-    panel.onDidDispose(() => panels.delete(key));
+    created.onDidDispose(() => {
+      if (panel === created) {
+        panel = undefined;
+        currentUri = undefined;
+      }
+    });
+    panel = created;
+  } else if (reveal) {
+    panel.reveal(panel.viewColumn, true);
   }
-  panel.title = `Certificate: ${document.fileName.split(/[\\/]/).pop() ?? 'TLS Secret'}`;
-  panel.webview.html = renderCertificate(context, panel.webview, details);
-}
 
-function renderCertificate(
-  context: vscode.ExtensionContext,
-  webview: vscode.Webview,
-  details: CertificateDetails
-): string {
-  const rows: Array<[string, string, boolean]> = [
-    ['Subject', details.subject, false],
-    ['Issuer', details.issuer, false],
-    ['Valid from', details.validFrom, false],
-    ['Valid to', details.validTo, false],
-    ['Serial number', details.serialNumber, true],
-    ['SHA-256 fingerprint', details.fingerprint, true],
-    ['Subject alternative names', details.subjectAlternativeNames, false],
-    ['Public key type', details.publicKeyType, false]
-  ];
-  const rowsHtml = rows.map(([label, value, monospace]) =>
-    `<div class="field"><dt><fluent-text size="200" weight="semibold">${escapeHtml(label)}</fluent-text></dt><dd><fluent-text block${monospace ? ' font="monospace"' : ''}>${escapeHtml(value)}</fluent-text></dd></div>`
-  ).join('');
-  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'out', 'webview.js'));
-  const nonce = randomBytes(16).toString('base64');
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
-  <title>Certificate details</title>
-  <style>
-    body { color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); margin: 0; padding: 2rem; }
-    .page { max-width: 900px; margin: 0 auto; }
-    .header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
-    .eyebrow { color: var(--vscode-descriptionForeground); letter-spacing: .08em; text-transform: uppercase; }
-    h1 { font-size: 1.6rem; font-weight: 600; margin: .25rem 0 0; }
-    fluent-divider { margin-bottom: 1.25rem; }
-    .details { background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-panel-border); border-radius: 8px; overflow: hidden; }
-    dl { margin: 0; }
-    .field { display: grid; grid-template-columns: minmax(11rem, 28%) minmax(0, 1fr); gap: 1.25rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--vscode-panel-border); }
-    .field:last-child { border-bottom: 0; }
-    dt { color: var(--vscode-descriptionForeground); }
-    dd { margin: 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-    fluent-text { color: var(--vscode-foreground); }
-    .eyebrow fluent-text { color: var(--vscode-descriptionForeground); }
-    .note { color: var(--vscode-descriptionForeground); margin-top: 1rem; }
-    @media (max-width: 560px) {
-      body { padding: 1rem; }
-      .field { grid-template-columns: 1fr; gap: .4rem; padding: .9rem 1rem; }
-      .header { align-items: flex-start; }
-    }
-  </style>
-</head>
-<body>
-  <main class="page">
-    <header class="header">
-      <div>
-        <h1><fluent-text size="700" weight="semibold">Certificate details</fluent-text></h1>
-      </div>
-      <fluent-badge appearance="tint" color="informative">X.509</fluent-badge>
-    </header>
-    <fluent-divider></fluent-divider>
-    <section class="details" aria-label="X.509 certificate properties">
-      <dl>${rowsHtml}</dl>
-    </section>
-    <div class="note"><fluent-text size="200">Certificate details are parsed locally; trust and chain validation are not performed.</fluent-text></div>
-  </main>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
-}
-
-function renderError(message: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none';">
-  <title>Certificate error</title>
-</head>
-<body><p>${escapeHtml(message)}</p></body>
-</html>`;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, character => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  })[character]!);
+  currentUri = uri;
+  panel.title = title;
+  panel.webview.html = render({
+    cspSource: panel.webview.cspSource,
+    scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'out', 'webview.js')).toString(),
+    nonce: randomBytes(16).toString('base64')
+  });
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unable to read the TLS certificate.';
+  return error instanceof Error ? error.message : 'Unable to read the certificate.';
 }

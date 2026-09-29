@@ -1,10 +1,10 @@
 {
-  "name": "yamlcert",
-  "displayName": "Kubernetes TLS Certificate Viewer",
-  "description": "Displays certificate details from Kubernetes TLS Secret YAML files on request.",
+  "name": "certview",
+  "displayName": "CertView",
+  "description": "Inspect X.509 certificates from .crt, .pem and .pfx files and Kubernetes TLS Secret YAML files, with full CA chain display and system trust validation.",
   "version": "0.0.1",
   "publisher": "local",
-  "repository": "",
+  "repository": "https://github.com/nataz77/vscode-k8scert",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,23 +12,44 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:yamlcert.showCertificate"
+    "onCommand:certview.showCertificate"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "yamlcert.showCertificate",
-        "title": "Kubernetes TLS: Show Certificate Details",
+        "command": "certview.showCertificate",
+        "title": "CertView: Show Certificate Details",
         "icon": "$(key)"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "yamlcert.showCertificate",
-          "when": "resourceLangId == yaml",
+          "command": "certview.showCertificate",
+          "when": "resourceLangId == yaml || resourceExtname =~ /^\\.(crt|cer|pem|pfx|p12)$/i",
           "group": "navigation@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "certview.showCertificate",
+          "when": "resourceLangId == yaml || resourceExtname =~ /^\\.(crt|cer|pem|pfx|p12)$/i",
+          "group": "navigation@99"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "certview.showCertificate",
+          "when": "resourceLangId == yaml || resourceExtname =~ /^\\.(crt|cer|pem|pfx|p12)$/i",
+          "group": "navigation@99"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "certview.showCertificate",
+          "when": "resourceLangId == yaml || resourceExtname =~ /^\\.(crt|cer|pem|pfx|p12)$/i",
+          "group": "navigation@99"
         }
       ]
     }
@@ -40,10 +61,12 @@
   "dependencies": {
     "@fluentui/tokens": "^1.0.0-alpha.24",
     "@fluentui/web-components": "^3.1.3",
+    "node-forge": "^1.4.0",
     "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
+    "@types/node-forge": "^1.3.14",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",

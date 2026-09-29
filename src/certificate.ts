@@ -10,12 +10,23 @@ export interface CertificateDetails {
   fingerprint: string;
   subjectAlternativeNames: string;
   publicKeyType: string;
+  isCa: boolean;
 }
+
+export class TlsSecretError extends Error {}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+export function splitPemCertificates(text: string): string[] {
+  return text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+}
+
+export function parsePemCertificates(text: string): X509Certificate[] {
+  return splitPemCertificates(text).map(pem => new X509Certificate(pem));
 }
 
 function decodeCertificate(value: unknown): string | undefined {
@@ -30,7 +41,7 @@ function decodeCertificate(value: unknown): string | undefined {
 
   const encoded = trimmed.replace(/\s+/g, '');
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
-    throw new Error('The Secret data.tls.crt value is not valid base64.');
+    throw new TlsSecretError('The Secret data.tls.crt value is not valid base64.');
   }
 
   return Buffer.from(encoded, 'base64').toString('utf8');
@@ -41,7 +52,21 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toUTCString();
 }
 
-export function parseTlsSecretCertificate(source: string): CertificateDetails | undefined {
+export function describeCertificate(certificate: X509Certificate): CertificateDetails {
+  return {
+    subject: certificate.subject || 'Not provided',
+    issuer: certificate.issuer || 'Not provided',
+    validFrom: formatDate(certificate.validFrom),
+    validTo: formatDate(certificate.validTo),
+    serialNumber: certificate.serialNumber || 'Not provided',
+    fingerprint: certificate.fingerprint256 || 'Not provided',
+    subjectAlternativeNames: certificate.subjectAltName || 'Not provided',
+    publicKeyType: certificate.publicKey.asymmetricKeyType || 'Not provided',
+    isCa: certificate.ca
+  };
+}
+
+export function parseTlsSecretCertificates(source: string): X509Certificate[] | undefined {
   const documents = parseAllDocuments(source, { uniqueKeys: true });
   const parseErrors = documents.flatMap(document => document.errors);
   if (parseErrors.length > 0) {
@@ -58,26 +83,18 @@ export function parseTlsSecretCertificate(source: string): CertificateDetails | 
     const data = asRecord(secret.data);
     const pem = decodeCertificate(stringData?.['tls.crt'] ?? data?.['tls.crt']);
     if (!pem) {
-      throw new Error('This TLS Secret does not contain tls.crt.');
+      throw new TlsSecretError('This TLS Secret does not contain tls.crt.');
     }
 
-    let certificate: X509Certificate;
     try {
-      certificate = new X509Certificate(pem);
+      const certificates = parsePemCertificates(pem);
+      if (certificates.length === 0) {
+        throw new Error('No certificate found.');
+      }
+      return certificates;
     } catch {
-      throw new Error('The Secret tls.crt value is not a valid X.509 certificate.');
+      throw new TlsSecretError('The Secret tls.crt value is not a valid X.509 certificate.');
     }
-
-    return {
-      subject: certificate.subject || 'Not provided',
-      issuer: certificate.issuer || 'Not provided',
-      validFrom: formatDate(certificate.validFrom),
-      validTo: formatDate(certificate.validTo),
-      serialNumber: certificate.serialNumber || 'Not provided',
-      fingerprint: certificate.fingerprint256 || 'Not provided',
-      subjectAlternativeNames: certificate.subjectAltName || 'Not provided',
-      publicKeyType: certificate.publicKey.asymmetricKeyType || 'Not provided'
-    };
   }
 
   return undefined;

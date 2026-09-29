@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseTlsSecretCertificate } from '../src/certificate';
+import { describeCertificate, parseTlsSecretCertificates } from '../src/certificate';
+
+const parseTlsSecretCertificate = (source: string) => {
+  const certificates = parseTlsSecretCertificates(source);
+  return certificates && describeCertificate(certificates[0]);
+};
 
 const secret = (fields: string) => `apiVersion: v1\nkind: Secret\ntype: kubernetes.io/tls\n${fields}`;
 const certificatePem = `-----BEGIN CERTIFICATE-----
@@ -33,6 +38,7 @@ test('parses a base64-encoded X.509 certificate from a TLS Secret', () => {
   assert.equal(details?.subject, 'CN=example.test');
   assert.equal(details?.issuer, 'CN=example.test');
   assert.equal(details?.publicKeyType, 'rsa');
+  assert.equal(details?.isCa, false);
   assert.equal(details?.subjectAlternativeNames, 'Not provided');
   assert.match(details?.fingerprint ?? '', /^[A-F0-9:]+$/);
 });
@@ -64,4 +70,10 @@ test('rejects certificate data that is not a valid X.509 certificate', () => {
 
 test('rejects invalid YAML', () => {
   assert.throws(() => parseTlsSecretCertificate('kind: [Secret'), /Unable to parse YAML/);
+});
+
+test('returns every certificate in a tls.crt chain', () => {
+  const encoded = Buffer.from(`${certificatePem}\n${certificatePem}`).toString('base64');
+  const certificates = parseTlsSecretCertificates(secret(`data:\n  tls.crt: ${encoded}`));
+  assert.equal(certificates?.length, 2);
 });
