@@ -2,7 +2,7 @@
   "name": "certview",
   "displayName": "CertView",
   "description": "Inspect X.509 certificates from .crt, .pem and .pfx files and Kubernetes TLS Secret YAML files, with full CA chain display and system trust validation.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "local",
   "repository": "https://github.com/nataz77/vscode-k8scert",
   "engines": {
