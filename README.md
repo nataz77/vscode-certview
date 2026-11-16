@@ -19,4 +19,3 @@ A small VS Code extension that displays certificate details on request from Kube
 
 The extension uses a single details pane. While it is open, activating another supported file (YAML, `.crt`, `.pem`, `.pfx`, ...) updates the pane in place instead of opening a new one. Files that are not certificates leave the pane unchanged. Password protected PKCS#12 files show a hint until you run the command on them.
 
-Run `npm test` to compile the extension and execute the parser tests.
